@@ -1304,12 +1304,15 @@ impl State {
     }
 
     fn unconstrain_window_popup(&self, popup: &PopupKind, window: &Window) {
+        let ime = matches!(popup, PopupKind::InputMethod(_));
+
         // The target geometry for the positioner should be relative to its parent's geometry, so
         // we will compute that here.
-        let mut target = self.niri.layout.popup_target_rect(window);
+        let mut target = self.niri.layout.popup_target_rect(window, ime);
         target.loc -= get_popup_toplevel_coords(popup).to_f64();
 
-        self.position_popup_within_rect(popup, target, true);
+        // Don't add padding for IME popups; better to give them more space.
+        self.position_popup_within_rect(popup, target, !ime);
     }
 
     pub fn unconstrain_layer_shell_popup(
@@ -1377,7 +1380,7 @@ impl State {
                     bbox.loc.x -= overflow_x;
                 }
 
-                // Ensure that the popup starts within the window.
+                // Ensure that the popup starts within the target rect.
                 bbox.loc.x = f64::max(bbox.loc.x, target.loc.x);
 
                 // Try to position IME popup below the text input rectangle.
