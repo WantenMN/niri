@@ -1,0 +1,58 @@
+# Publish fork builds to your own Cachix cache.
+# Upstream has no Cachix push for the flake; this pushes
+# release_fork -> wanten cache, so nixos
+# `nix flake update niri` can hit the binary cache directly.
+name: Cachix Fork
+
+on:
+  push:
+    branches:
+      - release_fork
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish Fork Flake
+    if: github.repository == 'WantenMN/niri'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          show-progress: false
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          dotnet: false
+          large-packages: false
+
+      - name: Install nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+
+      - name: Authenticate with Cachix
+        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: wanten
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # No daemon push: we push the exact runtime closure below.
+          # Daemon mode races job end (final artifact missed) and also
+          # pushes build-time-only deps, wasting cache storage.
+          skipPush: true
+          useDaemon: false
+
+      - name: Build and push runtime closure
+        # pipefail: without it a failing `nix build` is masked by `cachix push`
+        # reading empty stdin ("Nothing to push") and the job stays green.
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: nix build -L --no-link --print-out-paths .#default | cachix push wanten
+
+      - name: Pin release in Cachix
+        # Pinned paths are immune to LRU garbage collection; keep the last 5.
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          out=$(nix build --no-link --print-out-paths .#default)
+          cachix pin wanten niri-release_fork "$out" --keep-revisions 5
