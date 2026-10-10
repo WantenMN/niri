@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches-ignore:
+      # Fork-only: release_fork pushes are built by cachix-fork.yml (nix build
+      # + cachix push + pin). The full upstream matrix is not needed there.
+      - release_fork
   pull_request:
   workflow_dispatch:
   schedule:
