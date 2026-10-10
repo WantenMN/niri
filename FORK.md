@@ -7,6 +7,14 @@
 已于 2026-10-10 被上游合并（`39dc2197` + 后续修正 `d0cd58ec`），
 上游实现比原分支更完整，无需再合入。旧分支留档即可。
 
+## Fork-only 文件（rebase 时保留）
+
+* `.github/workflows/cachix-fork.yml`：release_fork 专属构建推送，上游没有此文件。
+* `.github/workflows/ci.yml`：仅改了 `on.push`，加了 `branches-ignore: [release_fork]`。
+  上游全量矩阵在 release_fork push 时不需要（构建由 cachix-fork 负责），
+  PR 仍会跑 CI。rebase 若提示此 hunk 冲突，保留我方 `branches-ignore` 即可。
+* `FORK.md` / `sync-upstream.sh`：本手册与同步脚本，上游没有。
+
 ## 0. 一键同步（推荐）
 
 ```bash
