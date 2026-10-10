@@ -25,7 +25,7 @@
 rebase 到 `upstream/main`。
 **它从不 push**：看完结果自己手动推。
 
-推完等 CI 绿，nixos 侧 `nix flake update niri` + 重建验证（第 3 节）。
+推完等 CI 绿，nixos 侧 `nix flake update niri` + 重建验证（第 4 节）。
 
 ## 1. 手动步骤（脚本做的事，拆开看）
 
@@ -41,7 +41,29 @@ niri 没有 grammar lock 这类生成文件：`Cargo.lock` / `flake.lock`
 如果上游更新了 `flake.lock` 里的 nixpkgs，大版本构建产物会变，
 CI 会全量重建一次，属于正常现象。
 
-## 2. 改动-成本速查
+## 2. 铁律：fork 的 nixpkgs 必须和系统同 glibc 时代
+
+niri 在 TTY 下走 GBM/EGL，`libgbm` 会从**系统**路径
+`/run/opengl-driver/lib/gbm` 动态加载 backend（`nvidia-drm_gbm.so` /
+`dri_gbm.so`）。这些 backend 是系统 nixpkgs 构建的，要求系统同代的
+glibc；niri 进程自身的 glibc 来自它构建时的 nixpkgs。
+两边 glibc 大版本一错代就会复现 2026-10-10 的故障：
+`failed to open dri … version GLIBC_X.XX not found` → 无 renderer → 黑屏卡死。
+
+因此：**系统侧每次 `nix flake update` 若升了 glibc，fork 侧必须同步
+`nix flake update nixpkgs` 并推送重建**。对齐检查（两边输出应一致）：
+
+```bash
+nix eval --impure --expr '(builtins.getFlake "/home/wanten/repos/dotfiles/nixos").inputs.nixpkgs.legacyPackages.x86_64-linux.glibc.version'
+nix eval --impure --expr '(builtins.getFlake "/home/wanten/repos/clone/niri").inputs.nixpkgs.legacyPackages.x86_64-linux.glibc.version'
+```
+
+这也是本 fork 不用 `inputs.nixpkgs.follows` 的原因：
+follows 能永远对齐，但 CI  standalone 构建的闭包就和消费侧不一致，
+二进制缓存永远命中不了。代价就是 glibc 换代时要手动同步一次
+（一年几次），CI 重建约半小时。
+
+## 3. 改动-成本速查
 
 | 你改了什么 | CI 代价 |
 |---|---|
@@ -49,7 +71,7 @@ CI 会全量重建一次，属于正常现象。
 | Rust 代码 / `Cargo.lock` | 全量（cargo + nix 都重建）|
 | `flake.nix` / `flake.lock` | 全量（依赖图变化，闭包大变）|
 
-## 3. nixos 侧验证（冷机等价）
+## 4. nixos 侧验证（冷机等价）
 
 ```bash
 nix flake update niri   # dotfiles/nixos 下
@@ -65,7 +87,12 @@ done
 无 MISS = 任意冷机纯下载可用。`niri --version` 的 commit 应与
 `release_fork` HEAD 短 hash 一致（nix 构建经 `NIRI_BUILD_COMMIT` 注入）。
 
-## 4. 排错
+## 5. 排错
+
+* TTY 黑屏卡死 + 日志出现 `failed to open dri … version GLIBC_X.XX not found` →
+  fork 的 nixpkgs 比系统老了一代，按第 2 节同步 `nix flake update nixpkgs`。
+  应急可用 `nix run --impure github:guibou/nixGL -- <niri 二进制>` 绕过
+  （nixGL 的 `LD_LIBRARY_PATH` 带了新 glibc），但这只是止痛，根治靠对齐。
 
 * `cachix push` 报 `Nothing to push` 且构建失败 → 看完整日志找第一个
   `error: Cannot build`（`pipefail` 已开，这种情况 CI 会直接红）。
