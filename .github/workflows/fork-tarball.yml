@@ -1,0 +1,157 @@
+# Fork rolling tarball (traditional Linux packaging, no Nix).
+#
+# Push to release_fork -> cargo build --release on ubuntu-24.04, assemble the
+# FHS payload (bin/ lib/ share/, same mapping as Cargo.toml [metadata.deb]
+# assets), pack niri-linux-x86_64.tar.gz, force-move rolling tag
+# `fork-linux-x86_64`, upload, fill version/hash into dist/nix/niri-fork.nix,
+# upload that too, then verify with a real `nix build` of the uploaded URL.
+#
+# dotfiles consumes this via pkgs/update-fork-tarballs.sh which just downloads
+# the generated niri-fork.nix. Replaces cachix-fork.yml (deleted).
+name: Fork Tarball
+
+on:
+  push:
+    branches:
+      - release_fork
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-tarball-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROLL_TAG: fork-linux-x86_64
+  TARBALL: niri-linux-x86_64.tar.gz
+  NIX_ASSET: niri-fork.nix
+  NIXPKGS_TARBALL: https://channels.nixos.org/nixos-unstable/nixexprs.tar.zst
+
+jobs:
+  tarball:
+    name: Build, publish and verify tarball
+    if: github.repository == 'WantenMN/niri'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          show-progress: false
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          dotnet: false
+          large-packages: false
+
+      - name: Install build dependencies
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gcc clang pkg-config \
+            libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev \
+            libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev \
+            libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          key: fork-tarball-cargo
+
+      - name: Compute rolling version
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          short_sha=$(git rev-parse --short HEAD)
+          ver_date=$(date -u +%Y.%m.%d)
+          upstream=$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml | head -n 1)
+          echo "roll_version=${upstream}-${ver_date}-g${short_sha}" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: cargo build --locked --release
+
+      - name: Assemble FHS stage and pack tarball
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          rm -rf stage
+          mkdir -p stage/bin stage/lib/systemd/user \
+            stage/share/wayland-sessions stage/share/xdg-desktop-portal \
+            stage/share/bash-completion/completions \
+            stage/share/fish/vendor_completions.d \
+            stage/share/zsh/site-functions
+          install -Dm755 target/release/niri stage/bin/niri
+          install -Dm755 resources/niri-session stage/bin/niri-session
+          install -Dm644 resources/niri.desktop stage/share/wayland-sessions/niri.desktop
+          install -Dm644 resources/niri-portals.conf stage/share/xdg-desktop-portal/niri-portals.conf
+          # Tarball uses the /usr prefix convention; the nix drv rewrites it.
+          sed 's|^ExecStart=niri|ExecStart=/usr/bin/niri|' resources/niri.service \
+            > stage/lib/systemd/user/niri.service
+          install -Dm644 resources/niri-shutdown.target stage/lib/systemd/user/niri-shutdown.target
+          # Pre-generate shell completions (the nix drv must not execute the
+          # ubuntu-linked binary inside its sandbox before patchelf).
+          ./target/release/niri completions bash > stage/share/bash-completion/completions/niri
+          ./target/release/niri completions fish > stage/share/fish/vendor_completions.d/niri.fish
+          ./target/release/niri completions zsh > stage/share/zsh/site-functions/_niri
+          printf 'version=%s\ncommit=%s\n' "$roll_version" "$GITHUB_SHA" > stage/BUILD-INFO.txt
+          tar -czf "$TARBALL" -C stage .
+          ls -lh "$TARBALL"
+
+      - name: Smoke test staged payload
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          rm -rf /tmp/niri-smoke
+          mkdir -p /tmp/niri-smoke
+          tar -xzf "$TARBALL" -C /tmp/niri-smoke
+          /tmp/niri-smoke/bin/niri --version
+          /tmp/niri-smoke/bin/niri validate -c resources/default-config.kdl
+          sh -n /tmp/niri-smoke/bin/niri-session
+
+      - name: Install nix (verification only)
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+
+      - name: Publish tarball to rolling release
+        shell: bash --noprofile --norc -eo pipefail {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag -f "$ROLL_TAG"
+          git push -f origin "$ROLL_TAG"
+          if ! gh release view "$ROLL_TAG" >/dev/null 2>&1; then
+            gh release create "$ROLL_TAG" \
+              --title "Niri fork rolling (linux x86_64)" \
+              --notes "Rolling prebuilt tarball from release_fork. Nix consumers fetch ${NIX_ASSET}." \
+              --target release_fork
+          fi
+          gh release upload "$ROLL_TAG" "$TARBALL" --clobber
+
+      - name: Generate + publish verified .nix and verify nix build
+        shell: bash --noprofile --norc -eo pipefail {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          url="https://github.com/WantenMN/niri/releases/download/${ROLL_TAG}/${TARBALL}"
+          sri=$(nix store prefetch-file --json "$url" | jq -r .hash)
+          echo "sri: $sri"
+          if [ -z "$sri" ] || [ "$sri" = "null" ]; then
+            echo "error: failed to prefetch $url" >&2
+            exit 1
+          fi
+          sed -i -E \
+            -e "s|version = \".*\";|version = \"${roll_version}\";|" \
+            -e "s|hash = \"sha256-.*\";|hash = \"${sri}\";|" \
+            "dist/nix/${NIX_ASSET}"
+          grep -nE 'version = |url = |hash = ' "dist/nix/${NIX_ASSET}"
+          gh release upload "$ROLL_TAG" "dist/nix/${NIX_ASSET}" --clobber
+          out=$(nix build -L --impure --no-link --print-out-paths --expr \
+            "let pkgs = import (builtins.fetchTarball { url = \"$NIXPKGS_TARBALL\"; }) {}; in pkgs.callPackage ./dist/nix/${NIX_ASSET} {}")
+          echo "built: $out"
+          "$out/bin/niri" --version
+          "$out/bin/niri" validate -c resources/default-config.kdl
+          grep -q "$out/bin/niri" "$out/lib/systemd/user/niri.service"
