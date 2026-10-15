@@ -77,6 +77,26 @@ jobs:
         shell: bash --noprofile --norc -eo pipefail {0}
         run: cargo build --locked --release
 
+      - name: Vendor libdisplay-info.so.1
+        # Ubuntu 24.04 only has libdisplay-info 0.1/0.2 (SONAME .so.1) while
+        # nixpkgs only ships 0.3+ (SONAME .so.3): no nixpkgs package can
+        # satisfy the NEEDED entry. The lib is tiny (~200KB source), so build
+        # v0.1.1 from upstream git and ship its .so.1 inside our tarball; the
+        # nix drv's own lib/ then satisfies autoPatchelf.
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          sudo apt-get install -y meson ninja-build pkg-config
+          rm -rf vendor-display-info
+          git clone --depth 1 --branch v0.1.1 \
+            https://gitlab.freedesktop.org/emersion/libdisplay-info.git \
+            vendor-display-info
+          meson setup vendor-display-info/_build --prefix=/usr --libdir=lib
+          meson compile -C vendor-display-info/_build -j"$(nproc)"
+          rm -rf vendor-stage
+          mkdir -p vendor-stage
+          DESTDIR="$PWD/vendor-stage" meson install -C vendor-display-info/_build
+          find vendor-stage -name 'libdisplay-info.so.1*'
+
       - name: Assemble FHS stage and pack tarball
         shell: bash --noprofile --norc -eo pipefail {0}
         run: |
@@ -88,6 +108,13 @@ jobs:
             stage/share/zsh/site-functions
           install -Dm755 target/release/niri stage/bin/niri
           install -Dm755 resources/niri-session stage/bin/niri-session
+          # Vendored libdisplay-info.so.1* (see step above).
+          mkdir -p stage/lib
+          for f in vendor-stage/usr/lib/libdisplay-info.so.1*; do
+            cp -P "$f" stage/lib/
+          done
+          chmod 755 stage/lib/libdisplay-info.so.1.*
+          ls -l stage/lib/
           install -Dm644 resources/niri.desktop stage/share/wayland-sessions/niri.desktop
           install -Dm644 resources/niri-portals.conf stage/share/xdg-desktop-portal/niri-portals.conf
           # Tarball uses the /usr prefix convention; the nix drv rewrites it.
@@ -111,6 +138,7 @@ jobs:
           tar -xzf "$TARBALL" -C /tmp/niri-smoke
           /tmp/niri-smoke/bin/niri --version
           /tmp/niri-smoke/bin/niri validate -c resources/default-config.kdl
+          test -f /tmp/niri-smoke/lib/libdisplay-info.so.1
           sh -n /tmp/niri-smoke/bin/niri-session
 
       - name: Install nix (verification only)
