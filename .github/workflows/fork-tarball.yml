@@ -196,6 +196,22 @@ jobs:
           "$out/bin/niri" --version
           "$out/bin/niri" validate -c resources/default-config.kdl
           grep -q "$out/bin/niri" "$out/lib/systemd/user/niri.service"
+          grep -q "$out/bin/niri" "$out/bin/niri-session"
+          # Headless dlopen smoke: Ubuntu binary dlopens libwayland-*.so.0 /
+          # libEGL.so.1 at runtime (not DT_NEEDED), so a broken wrapper/RPATH
+          # panics here with NoWaylandLib / Failed to load LibEGL while
+          # --version/validate still pass. timeout 124 (still running) and 0
+          # (clean SIGTERM) both mean success; only the dlopen errors fail.
+          set +e
+          timeout 10 "$out/bin/niri" > /tmp/niri-headless.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/niri-headless.log
+          if grep -q "NoWaylandLib\|Failed to load LibEGL" /tmp/niri-headless.log; then
+            echo "error: niri dlopen smoke failed (wayland/EGL not in wrapper)" >&2
+            exit 1
+          fi
+          echo "headless smoke exit=$code (124=still running, 0=clean SIGTERM both ok)"
 
       - name: Prune old versioned releases (keep newest)
         # Old versions are separate releases so stale machines can reinstall
