@@ -93,10 +93,15 @@ jobs:
           # nixpkgs package can satisfy the NEEDED entry. Ship the system
           # .so.1 inside our tarball; the nix drv's own lib/ then satisfies
           # autoPatchelf. Same toolchain as the niri binary above.
+          ls -l /usr/lib/x86_64-linux-gnu/ | grep display || true
+          dpkg -L libdisplay-info1 | grep '\.so' || true
           mkdir -p stage/lib
-          cp -P /usr/lib/x86_64-linux-gnu/libdisplay-info.so.1* stage/lib/
-          chmod 755 stage/lib/libdisplay-info.so.1.*
+          for f in /usr/lib/x86_64-linux-gnu/libdisplay-info.so*; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            cp -P "$f" stage/lib/
+          done
           ls -l stage/lib/
+          test -f stage/lib/libdisplay-info.so.1
           install -Dm644 resources/niri.desktop stage/share/wayland-sessions/niri.desktop
           install -Dm644 resources/niri-portals.conf stage/share/xdg-desktop-portal/niri-portals.conf
           # Tarball uses the /usr prefix convention; the nix drv rewrites it.
