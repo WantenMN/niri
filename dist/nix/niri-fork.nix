@@ -97,4 +97,12 @@ stdenv.mkDerivation rec {
     platforms = [ "x86_64-linux" ];
     mainProgram = "niri";
   };
+
+  passthru = {
+    # Required by services.displayManager.sessionPackages type
+    # (`package with provided sessions`); mirrors nixpkgs niri.
+    # Without this, enabling GDM fails evaluation when programs.niri
+    # uses this tarball package.
+    providedSessions = [ "niri" ];
+  };
 }
